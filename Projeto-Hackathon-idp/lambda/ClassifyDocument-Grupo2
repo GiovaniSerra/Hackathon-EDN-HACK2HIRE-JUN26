@@ -1,0 +1,127 @@
+import json
+import boto3
+import re
+
+# Inicializa o cliente do Bedrock Runtime para fallback inteligente
+bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
+
+def heuristic_classifier(text_lower):
+    # --- ESTRATÉGIA DE ANALISAR O CABEÇALHO PRIMEIRO (Primeiros 300 caracteres) ---
+    header = text_lower[:300].replace("\n", " ")
+    if "formulário de abertura" in header or "formulario de abertura" in header or "dados do solicitante" in header:
+        return "FORMULARIO_SINISTRO"
+    if "boletim de ocorrência" in header or "boletim de ocorrencia" in header or "delegacia eletrônica" in header:
+        return "BOLETIM_OCORRENCIA"
+
+    # --- SE NÃO RESOLVER NO CABEÇALHO, BUSCA POR RELEVÂNCIA NO TEXTO INTEIRO ---
+    # Nota: Evitamos termos comuns que aparecem em listas de anexos
+    if any(kw in text_lower for kw in ["capitulação legal", "histórico da ocorrência", "autoridade policial"]):
+        return "BOLETIM_OCORRENCIA"
+    if "formulário de abertura" in text_lower or "formulario de abertura" in text_lower:
+        return "FORMULARIO_SINISTRO"
+    if any(kw in text_lower for kw in ["crlv", "licenciamento", "renavam", "senatran", "registro nacional de veículos"]):
+        return "CRLV_E"
+    if any(kw in text_lower for kw in ["carteira nacional de habilitação", "permissão para dirigir", "cat. hab.", "nº registro"]):
+        return "CNH"
+    if any(kw in text_lower for kw in ["danfe", "nota fiscal eletrônica", "nfe", "valor total da nota", "base de cálculo icms"]):
+        return "NOTA_FISCAL"
+    if any(kw in text_lower for kw in ["orçamento", "proposta comercial", "cotação de reposição", "tech & sound"]):
+        return "ORCAMENTO"
+    if any(kw in text_lower for kw in ["conta de luz", "energia são paulo", "kwh", "comprovante de residência", "conta do cliente"]):
+        return "COMPROVANTE_RESIDENCIA"
+    return None
+
+def lambda_handler(event, context):
+    try:
+        extracted_text = event.get('extracted_text', '')
+        file_key = event.get('file_key', '')
+        bucket_name = event.get('bucket', '')
+        
+        print(f"Iniciando classificação para o arquivo: {file_key}")
+        
+        if not extracted_text:
+            return {
+                'statusCode': 400,
+                'error': 'Nenhum texto extraído foi fornecido para classificação.'
+            }
+            
+        text_lower = extracted_text.lower()
+        inferred_type = heuristic_classifier(text_lower)
+        
+        # Se a heurística resolver
+        if inferred_type:
+            print(f"Documento classificado via HEURÍSTICA: {inferred_type}")
+            return {
+                'statusCode': 200,
+                'document_type': inferred_type,
+                'classification_method': 'HEURISTIC',
+                'confidence': 1.0,
+                'file_key': file_key,
+                'bucket': bucket_name,
+                'extracted_text': extracted_text # ENCAMINHAMENTO DE ESTADO SEGURO
+            }
+            
+        # Caso precise rodar no Bedrock (Claude 3.5 Haiku)
+        print("Recorrendo à classificação via Bedrock (Claude 3.5 Haiku)...")
+        truncated_text = extracted_text[:3000]
+        
+        prompt_system = (
+            "Você é um classificador de documentos de seguros especializado. Sua única tarefa é ler o texto "
+            "fornecido e categorizá-lo em EXATAMENTE um dos seguintes tipos permitidos:\n"
+            "- FORMULARIO_SINISTRO\n"
+            "- BOLETIM_OCORRENCIA\n"
+            "- CRLV_E\n"
+            "- NOTA_FISCAL\n"
+            "- ORCAMENTO\n"
+            "- CNH\n"
+            "- COMPROVANTE_RESIDENCIA\n"
+            "- OUTRO\n\n"
+            "Diretrizes:\nRetorne APENAS a palavra da categoria correspondente. Não adicione pontuação ou markdown."
+        )
+        
+        body_request = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 50,
+            "system": prompt_system,
+            "messages": [{"role": "user", "content": f"Texto:\n\n{truncated_text}"}],
+            "temperature": 0.0
+        })
+        
+        response_bedrock = bedrock_runtime.invoke_model(
+            modelId='anthropic.claude-3-5-haiku-20241022-v1:0',
+            contentType='application/json',
+            accept='application/json',
+            body=body_request
+        )
+        
+        response_body = json.loads(response_bedrock['body'].read().decode('utf-8'))
+        ai_raw = response_body['content'][0]['text'].strip().upper()
+        
+        allowed = ["FORMULARIO_SINISTRO", "BOLETIM_OCORRENCIA", "CRLV_E", "NOTA_FISCAL", "ORCAMENTO", "CNH", "COMPROVANTE_RESIDENCIA", "OUTRO"]
+        document_type = "OUTRO"
+        for allowed_type in allowed:
+            if allowed_type in ai_raw:
+                document_type = allowed_type
+                break
+                
+        return {
+            'statusCode': 200,
+            'document_type': document_type,
+            'classification_method': 'AI_BEDROCK',
+            'confidence': 0.95,
+            'file_key': file_key,
+            'bucket': bucket_name,
+            'upload_id': event.get('upload_id'),
+            'extracted_text': extracted_text # ENCAMINHAMENTO DE ESTADO SEGURO
+        }
+        
+    except Exception as e:
+        print(f"Erro na classificação: {str(e)}")
+        return {
+            'statusCode': 200,
+            'document_type': 'OUTRO',
+            'classification_method': 'FALLBACK_ERROR',
+            'file_key': file_key,
+            'bucket': bucket_name,
+            'extracted_text': event.get('extracted_text', '') # ENCAMINHAMENTO DE ESTADO SEGURO
+        }
