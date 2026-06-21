@@ -1,0 +1,113 @@
+import json
+import boto3
+import urllib.parse
+import os
+
+# Inicializa o cliente do Step Functions (Garante a região correta, ex: us-east-1)
+stepfunctions_client = boto3.client('stepfunctions', region_name='us-east-1')
+
+# Define o ARN da State Machine do Step Functions
+STATE_MACHINE_ARN = os.environ.get(
+    'STATE_MACHINE_ARN', 
+    'NOME FICTICIO'
+)
+
+def lambda_handler(event, context):
+    try:
+        print(f"Evento recebido na Lambda StartWorkflow: {json.dumps(event, ensure_ascii=False)}")
+        
+        # 1. Identifica a origem do evento de forma híbrida e resiliente
+        bucket_name = None
+        file_key = None
+        
+        if 'Records' in event:
+            # Caso A: Disparado diretamente pelo S3 Event Trigger
+            record = event['Records'][0]
+            bucket_name = record['s3']['bucket']['name']
+            raw_file_key = record['s3']['object']['key']
+            file_key = urllib.parse.unquote_plus(raw_file_key)
+            print("Origem identificada: S3 Event Trigger")
+        else:
+            # Caso B: Disparado por chamada direta / Step Functions / API Gateway / Teste Manual
+            bucket_name = event.get('bucket') or event.get('Payload', {}).get('bucket')
+            file_key = event.get('file_key') or event.get('Payload', {}).get('file_key')
+            
+            # Se vier encapsulado em um body (API Gateway)
+            if not bucket_name or not file_key:
+                body = event.get('body', {})
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except:
+                        body = {}
+                if isinstance(body, dict):
+                    bucket_name = bucket_name or body.get('bucket')
+                    file_key = file_key or body.get('file_key')
+            
+            if file_key:
+                file_key = urllib.parse.unquote_plus(file_key)
+                
+            print("Origem identificada: Direct Invoke / Test Event")
+
+        # Validação final de presença dos parâmetros
+        if not bucket_name or not file_key:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({
+                    'message': 'Parâmetros bucket ou file_key não foram identificados no input.',
+                    'received_event': event
+                }, ensure_ascii=False)
+            }
+            
+        print(f"Documento a processar: {file_key} (Bucket: {bucket_name})")
+        
+        # Ignora diretórios/pastas virtuais criados pelo S3
+        if file_key.endswith('/'):
+            return {
+                'statusCode': 200,
+                'body': json.dumps('Ignorado: O objeto selecionado é uma pasta virtual no S3.')
+            }
+
+        # 2. Monta o payload unificado para a máquina de estados
+        input_payload = {
+            "bucket": bucket_name,
+            "file_key": file_key,
+            "status_inicial": "INGESTED",
+            "contexto_hackathon": {
+                "grupo": "Grupo 2",
+                "case": "CaseB - Regulação de Sinistros"
+            }
+        }
+        
+        # 3. Cria um nome único de execução para o Step Functions livre de caracteres ilegais
+        clean_name = file_key.replace('/', '-').replace(' ', '_').replace(':', '-')
+        execution_name = f"Exec-{clean_name}"
+        execution_name = execution_name[:75] # Limita a 75 caracteres para segurança
+
+        # 4. Inicia a execução do Step Functions
+        print(f"Disparando execução da State Machine. Nome: {execution_name}")
+        response = stepfunctions_client.start_execution(
+            stateMachineArn=STATE_MACHINE_ARN,
+            name=execution_name,
+            input=json.dumps(input_payload, ensure_ascii=False)
+        )
+        
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Fluxo de processamento de sinistro iniciado com sucesso!',
+                'execution_arn': response['executionArn'],
+                'start_date': str(response['startDate']),
+                's3_target': f"s3://{bucket_name}/{file_key}"
+            }, ensure_ascii=False)
+        }
+        
+    except Exception as e:
+        print(f"Erro crítico ao iniciar o Step Functions: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'message': 'Falha ao despoletar a máquina de estados (Step Functions).',
+                'error': str(e)
+            }, ensure_ascii=False)
+        }
