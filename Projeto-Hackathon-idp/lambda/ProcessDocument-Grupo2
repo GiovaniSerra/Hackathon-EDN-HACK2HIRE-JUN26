@@ -1,0 +1,94 @@
+import json
+import boto3
+import urllib.parse
+import time
+
+textract = boto3.client('textract', region_name='us-east-1')
+
+def lambda_handler(event, context):
+    print(f"Evento recebido no ProcessDocument (Assíncrono): {json.dumps(event, ensure_ascii=False)}")
+    
+    bucket_name = None
+    file_key = None
+    upload_id = None # Inicializa a variável para evitar o NameError
+    
+    # 1. CAPTURA DOS PARÂMETROS DE FORMA HÍBRIDA
+    if 'detail' in event and 'bucket' in event['detail']:
+        bucket_name = event['detail']['bucket']['name']
+        raw_file_key = event['detail']['object']['key']
+        file_key = urllib.parse.unquote(raw_file_key)
+        
+        # Se vier pelo EventBridge, o upload_id pode ser extraído do nome do caminho se necessário,
+        # ou buscado dentro de metadados se o front-end injetou. Como fallback, criamos um se não existir:
+        upload_id = event.get('upload_id') or f"LOTE-S3-{int(time.time())}"
+        
+    elif 'bucket' in event and 'file_key' in event:
+        bucket_name = event['bucket']
+        file_key = urllib.parse.unquote(event['file_key'])
+        # Captura o upload_id enviado diretamente no teste manual ou API Gateway
+        upload_id = event.get('upload_id')
+
+    # Fallback final de segurança para garantir que o upload_id NUNCA seja nulo ou indefinido
+    if not upload_id:
+        upload_id = f"LOTE-AUTO-{str(time.time()).replace('.', '')[:10]}"
+
+    if not bucket_name or not file_key:
+        raise ValueError("Bucket ou file_key não localizado.")
+
+    print(f"Iniciando Job do Textract. Upload ID associado: {upload_id}")
+
+    try:
+        # Inicia o processamento assíncrono do Textract
+        start_response = textract.start_document_text_detection(
+            DocumentLocation={
+                'S3Object': {
+                    'Bucket': bucket_name,
+                    'Name': file_key
+                }
+            }
+        )
+        
+        job_id = start_response['JobId']
+        
+        while True:
+            status_response = textract.get_document_text_detection(JobId=job_id)
+            status = status_response['JobStatus']
+            
+            if status in ['SUCCEEDED', 'FAILED']:
+                break
+            time.sleep(2)
+
+        if status == 'FAILED':
+            raise Exception(f"O Job do Textract falhou: {status_response.get('StatusMessage')}")
+
+        extracted_text_lines = []
+        next_token = None
+        
+        while True:
+            if next_token:
+                response_pages = textract.get_document_text_detection(JobId=job_id, NextToken=next_token)
+            else:
+                response_pages = textract.get_document_text_detection(JobId=job_id)
+                
+            blocks = response_pages.get('Blocks', [])
+            for block in blocks:
+                if block['BlockType'] == 'LINE':
+                    extracted_text_lines.append(block['Text'])
+                    
+            next_token = response_pages.get('NextToken')
+            if not next_token:
+                break
+
+        full_text = "\n".join(extracted_text_lines)
+
+        return {
+            "status": "SUCCEEDED",
+            "bucket": bucket_name,
+            "file_key": file_key,
+            "upload_id": str(upload_id),
+            "extracted_text": full_text
+        }
+
+    except Exception as e:
+        print(f"Erro fatal no Textract: {str(e)}")
+        raise e
