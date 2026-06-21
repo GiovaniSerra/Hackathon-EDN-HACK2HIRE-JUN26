@@ -1,0 +1,124 @@
+import json
+import boto3
+import base64
+import uuid
+import os
+import mimetypes
+
+# Inicializa o cliente do Amazon S3
+s3_client = boto3.client('s3')
+
+# Define o nome do bucket utilizado pelo Grupo 2 (com variável de ambiente ou fallback)
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'docusmart-documents-hackathon-grupo2')
+
+def lambda_handler(event, context):
+    # Configuração de CORS padrão para todas as respostas da API
+    cors_headers = {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*', # Essencial para permitir chamadas do vosso Front-end local ou web
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        'Access-Control-Allow-Methods': 'POST,OPTIONS'
+    }
+    
+    try:
+        # 1. Trata requisições de preflight (CORS OPTIONS) de forma automática e isolada
+        # Isto evita erros de CORS no navegador antes de enviar o arquivo de facto
+        http_method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method')
+        if http_method == 'OPTIONS':
+            return {
+                'statusCode': 200,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Preflight CORS aprovado com sucesso.'})
+            }
+        
+        # 2. Validação básica de segurança do Body
+        if not event.get('body'):
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Corpo da requisição ausente (Body nulo).'}, ensure_ascii=False)
+            }
+        
+        # 3. Trata decodificação se o próprio API Gateway já tiver codificado o body em Base64
+        body_str = event['body']
+        if event.get('isBase64Encoded', False):
+            body_str = base64.b64decode(body_str).decode('utf-8')
+            
+        # Parse seguro do JSON recebido
+        try:
+            body = json.loads(body_str) if isinstance(body_str, str) else body_str
+        except Exception:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'JSON de entrada inválido ou malformado.'}, ensure_ascii=False)
+            }
+            
+        # 4. Captura e valida os parâmetros do payload
+        file_base64 = body.get('file_content')
+        file_name = body.get('file_name')
+        
+        if not file_base64 or not file_name:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Parâmetros obrigatórios ausentes: file_content ou file_name.'}, ensure_ascii=False)
+            }
+            
+        # 5. Tratamento de cabeçalho Data URL do Base64 (ex: "data:application/pdf;base64,")
+        # Remove a assinatura inicial gerada por inputs HTML5 antes de decodificar
+        if ',' in file_base64:
+            file_base64 = file_base64.split(',')[1]
+            
+        # Descodifica de Base64 para o binário nativo do arquivo
+        try:
+            file_binary = base64.b64decode(file_base64)
+        except Exception:
+            return {
+                'statusCode': 400,
+                'headers': cors_headers,
+                'body': json.dumps({'message': 'Erro ao descodificar a string Base64 fornecida.'}, ensure_ascii=False)
+            }
+            
+        # 6. Define Content-Type de forma inteligente com base na extensão para o S3 exibir corretamente
+        content_type, _ = mimetypes.guess_type(file_name)
+        if not content_type:
+            content_type = 'application/pdf' if file_name.lower().endswith('.pdf') else 'application/octet-stream'
+            
+        # 7. Gera uma chave única (S3 Key) usando UUID para evitar colisões e sobrescritas de arquivos
+        unique_id = str(uuid.uuid4())[:8]
+        # Limpa espaços e caracteres indesejados do nome do arquivo para garantir compatibilidade
+        clean_file_name = "".join(c for c in file_name if c.isalnum() or c in "._-").strip()
+        s3_key = f"{unique_id}_{clean_file_name}"
+        
+        # 8. Upload do arquivo binário diretamente para o Amazon S3
+        print(f"A enviar o ficheiro {s3_key} para o S3 Bucket {BUCKET_NAME}...")
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=file_binary,
+            ContentType=content_type
+        )
+        
+        # 9. Retorno com sucesso e status INGESTED
+        return {
+            'statusCode': 201,
+            'headers': cors_headers,
+            'body': json.dumps({
+                'message': 'Upload realizado com sucesso!',
+                's3_key': s3_key,
+                'bucket': BUCKET_NAME,
+                'status': 'INGESTED'
+            }, ensure_ascii=False)
+        }
+        
+    except Exception as e:
+        print(f"Erro crítico no processamento de upload: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': cors_headers,
+            'body': json.dumps({
+                'message': 'Ocorreu um erro interno ao processar o upload.',
+                'error': str(e)
+            }, ensure_ascii=False)
+        }
