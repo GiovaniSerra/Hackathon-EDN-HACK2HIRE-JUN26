@@ -107,6 +107,16 @@ Capturas de tela e testes podem ser encontrados em:
 
 ## Equipe
 
+[Diego](https://github.com/Diego-jpeg-27)
+
+[Giovani](https://github.com/GiovaniSerra)
+
+[Marcia](https://github.com/Marcia-Moreira)
+
+[Patick](https://github.com/branconecessary-cmd)
+
+[Vinicius](https://github.com/Vini58250759)
+
 
 ## Licença
 
