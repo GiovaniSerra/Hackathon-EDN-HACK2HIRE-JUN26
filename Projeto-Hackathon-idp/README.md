@@ -108,14 +108,26 @@ Capturas de tela e testes podem ser encontrados em:
 ## Equipe
 
 [Diego](https://github.com/Diego-jpeg-27)
+- Product Owner (PO)
+- Project Manager (PM)
 
 [Giovani](https://github.com/GiovaniSerra)
+- Solution Architect
+- Cloud Engineer
+- Technical Documentation
+
 
 [Marcia](https://github.com/Marcia-Moreira)
+- Front-end Developer
+- Customer Experience (CX)
 
-[Patick](https://github.com/branconecessary-cmd)
+[Patrick](https://github.com/branconecessary-cmd)
+-
+-
 
 [Vinicius](https://github.com/Vini58250759)
+- AI Engineer
+- AI/ML Integration
 
 
 ## Licença
