@@ -1,0 +1,161 @@
+import json
+import boto3
+import uuid
+import re
+from datetime import datetime
+
+# Inicializa os clientes da AWS
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+
+# Definição das duas tabelas do ecossistema
+FINAL_TABLE = dynamodb.Table('ClaimsComposite-Grupo2')
+CONTROL_TABLE = dynamodb.Table('UploadControl-Grupo2')
+
+def lambda_handler(event, context):
+    print(f"Evento recebido no Bedrock: {json.dumps(event, ensure_ascii=False)}")
+    
+    # 1. CAPTURA DE METADADOS DO FLUXO (Vindos do API Gateway / Step Functions)
+    extracted_text = event.get('extracted_text', '')
+    document_type = event.get('document_type', 'NÃO_CLASSIFICADO')
+    file_key = event.get('file_key', '')
+    
+    # Captura o upload_id enviado pelo front-end/script para amarrar o lote
+    upload_id = event.get('upload_id') or event.get('Payload', {}).get('upload_id')
+    
+    if not extracted_text.strip():
+        return {
+            "statusCode": 400,
+            "status_workflow": "SKIPPED",
+            "message": "Nenhum texto extraído localizado para análise."
+        }
+    
+    # 2. ENGENHARIA DE PROMPT (Claude 4.5 Haiku)
+    prompt = f"""
+    Você é um assistente especialista em análise de sinistros de seguros.
+    O documento atual foi classificado como: {document_type}.
+    
+    Analise o texto extraído do documento abaixo e retorne um objeto JSON estruturado exatamente com os seguintes campos:
+    - sinistro_id
+    - cliente_cpf
+    - nome_solicitante
+    - tipo_seguro
+    - descricao_sinistro
+    - analise_urgencia
+    
+    Diretrizes estritas de negócio:
+    1. No campo 'sinistro_id', extraia o número do sinistro (ex: SIN-XXXXX). Se não houver explicitamente no texto, retorne null.
+    2. No campo 'cliente_cpf', extraia apenas os números do CPF ou CNPJ do segurado/destinatário. Se não houver, retorne null.
+    3. No campo 'analise_urgencia', classifique o cenário estritamente como: BAIXA, MEDIA ou ALTA.
+    4. Retorne APENAS o objeto JSON puro. Não use blocos de código markdown (como ```json).
+    
+    Texto extraído para análise:
+    {extracted_text}
+    """
+
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1000,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+        "temperature": 0.1
+    })
+
+    # Mantendo o uso estrito do Claude 4.5 Haiku solicitado
+    model_id = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
+
+    try:
+        # Invoca a IA para extração analítica
+        response = bedrock.invoke_model(
+            modelId=model_id,
+            contentType='application/json',
+            accept='application/json',
+            body=body
+        )
+        
+        response_body = json.loads(response.get('body').read())
+        ai_response = response_body['content'][0]['text'].strip()
+        
+        if ai_response.startswith('```json'):
+            ai_response = ai_response[7:-3].strip()
+        elif ai_response.startswith('```'):
+            ai_response = ai_response[3:-3].strip()
+            
+        structured_data = json.loads(ai_response)
+        
+        # 3. EXTRAÇÃO INICIAL DA IA
+        ai_cpf = structured_data.get("cliente_cpf")
+        ai_sinistro = structured_data.get("sinistro_id")
+        
+        cliente_cpf_final = None
+        sinistro_id_final = None
+        
+        # Se for válido (puramente numérico ou string tratada), limpa a extração da IA
+        if ai_cpf and str(ai_cpf).lower() != 'null' and str(ai_cpf) != '00000000000':
+            cliente_cpf_final = str(ai_cpf).replace(".", "").replace("-", "").replace("/", "").strip()
+            
+        if ai_sinistro and str(ai_sinistro).lower() != 'null':
+            sinistro_id_final = str(ai_sinistro).strip()
+
+        # 4. INTELIGÊNCIA DE ACOPLAMENTO (ORQUESTRAÇÃO DAS DUAS TABELAS)
+        
+        # CASO A: É um FORMULARIO_SINISTRO (O documento âncora que gera o contexto)
+        if document_type == "FORMULARIO_SINISTRO" and cliente_cpf_final and sinistro_id_final:
+            print(f"Documento Âncora detectado. Registrando contexto no UploadControl para o upload_id: {upload_id}")
+            if upload_id:
+                CONTROL_TABLE.put_item(Item={
+                    "upload_id": str(upload_id),
+                    "cliente_cpf": cliente_cpf_final,
+                    "sinistro_id": sinistro_id_final,
+                    "data_registro": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                })
+        
+        # CASO B: É um anexo sem CPF/Sinistro (Herda dados da tabela de controle usando o upload_id)
+        if (not cliente_cpf_final or not sinistro_id_final) and upload_id:
+            print(f"Anexo detectado sem chaves claras no texto. Consultando controle para o lote: {upload_id}")
+            control_response = CONTROL_TABLE.get_item(Key={"upload_id": str(upload_id)})
+            
+            if 'Item' in control_response:
+                contexto_lote = control_response['Item']
+                cliente_cpf_final = cliente_cpf_final or contexto_lote.get('cliente_cpf')
+                sinistro_id_final = sinistro_id_final or contexto_lote.get('sinistro_id')
+                print(f"Contexto herdado com sucesso do lote! CPF: {cliente_cpf_final} | Sinistro: {sinistro_id_final}")
+
+        # CASO C: Fallback de segurança (Se rodar isolado ou o lote falhar, evita travar a PK/SK)
+        if not sinistro_id_final:
+            sinistro_id_final = f"AUTO-{str(uuid.uuid4())[:8].upper()}"
+        if not cliente_cpf_final:
+            cliente_cpf_final = f"PENDENTE-{sinistro_id_final}"
+
+        # 5. PERSISTÊNCIA NA TABELA DEFINITIVA (Chave Composta)
+        data_processamento = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        
+        item_dynamo = {
+            "cliente_cpf": cliente_cpf_final,      # Partition Key (PK)
+            "sinistro_id": sinistro_id_final,      # Sort Key (SK)
+            "data_processamento": data_processamento,
+            "tipo_documento": document_type,
+            "file_key": file_key,
+            "nome_solicitante": structured_data.get("nome_solicitante") or "Não Identificado",
+            "tipo_seguro": structured_data.get("tipo_seguro") or "Não Informado",
+            "descricao_sinistro": structured_data.get("descricao_sinistro") or "Sem descrição textual.",
+            "analise_urgencia": structured_data.get("analise_urgencia") or "MEDIA"
+        }
+        
+        FINAL_TABLE.put_item(Item=item_dynamo)
+        print(f"Sucesso! Registro cravado na ClaimsComposite. PK: {cliente_cpf_final} | SK: {sinistro_id_final}")
+        
+        return {
+            "statusCode": 200,
+            "status_workflow": "SUCCEEDED",
+            "cliente_cpf": cliente_cpf_final,
+            "sinistro_id": sinistro_id_final,
+            "metadata": item_dynamo
+        }
+
+    except Exception as e:
+        print(f"Erro crítico no pipeline do Bedrock/DynamoDB: {str(e)}")
+        return {
+            "statusCode": 500,
+            "status_workflow": "FAILED",
+            "error_message": str(e)
+        }
