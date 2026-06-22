@@ -6,7 +6,7 @@ import re
 bedrock_runtime = boto3.client('bedrock-runtime', region_name='us-east-1')
 
 def heuristic_classifier(text_lower):
-    # --- ESTRATÉGIA DE ANALISAR O CABEÇALHO PRIMEIRO (Primeiros 300 caracteres) ---
+    # --- ESTRATÉGIA DE PESO: ANALISA O CABEÇALHO PRIMEIRO (Primeiros 300 caracteres) ---
     header = text_lower[:300].replace("\n", " ")
     if "formulário de abertura" in header or "formulario de abertura" in header or "dados do solicitante" in header:
         return "FORMULARIO_SINISTRO"
