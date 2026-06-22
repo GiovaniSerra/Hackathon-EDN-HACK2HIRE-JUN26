@@ -6,10 +6,10 @@ import os
 # Inicializa o cliente do Step Functions (Garante a região correta, ex: us-east-1)
 stepfunctions_client = boto3.client('stepfunctions', region_name='us-east-1')
 
-# Define o ARN da State Machine do Step Functions
+# Define o ARN da State Machine do Step Functions do Grupo 2
 STATE_MACHINE_ARN = os.environ.get(
     'STATE_MACHINE_ARN', 
-    'NOME FICTICIO'
+    'arn:aws:states:us-east-1:123456789012:stateMachine:ClaimsProcessingWorkflow-Grupo2'
 )
 
 def lambda_handler(event, context):
