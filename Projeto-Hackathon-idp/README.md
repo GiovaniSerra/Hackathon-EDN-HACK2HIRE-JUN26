@@ -74,61 +74,11 @@ Processa informações relacionadas ao sinistro.
 
 Armazena os dados processados e metadados para consulta.
 
-## Status do Projeto
-
-### Infraestrutura
-
-* [x] API Gateway
-* [x] Amazon S3
-* [x] AWS Lambda
-* [x] Amazon DynamoDB
-
-### Processamento
-
-* [x] Upload de documentos
-* [x] Classificação inicial
-* [x] Análise de documentos
-* [x] Processamento de dados
-
-### Em Desenvolvimento
-
-* [ ] Step Functions
-* [ ] Integração completa com Textract
-* [ ] Integração completa com Comprehend
-* [ ] Bedrock Agent
-* [ ] RAG
-* [ ] Frontend
-
 ## Evidências
 
 Capturas de tela e testes podem ser encontrados em:
 
 [Evidence](https://github.com/GiovaniSerra/Hackathon-EDN-HACK2HIRE-JUN26/tree/main/Projeto-Hackathon-idp/evidence)
-
-## Equipe
-
-[Diego](https://github.com/Diego-jpeg-27)
-- Product Owner (PO)
-- Project Manager (PM)
-
-[Giovani](https://github.com/GiovaniSerra)
-- Solution Architect
-- Cloud Engineer
-- Technical Documentation
-
-
-[Marcia](https://github.com/Marcia-Moreira)
-- Front-end Developer
-- Customer Experience (CX)
-
-[Patrick](https://github.com/branconecessary-cmd)
--
--
-
-[Vinicius](https://github.com/Vini58250759)
-- AI Engineer
-- AI/ML Integration
-
 
 ## Licença
 
